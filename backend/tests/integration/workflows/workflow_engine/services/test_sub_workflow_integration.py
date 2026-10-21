@@ -41,6 +41,7 @@ from syntara.workflows.workflow_engine.activities.subworkflow_trigger import (
     subworkflow_trigger,
 )
 from syntara.workflows.workflow_engine.dynamic_workflow import OrchestratorWorkflow
+from syntara.workflows.workflow_engine.models.workflow_definition import SubWorkflowOutput
 from syntara.workflows.workflow_engine.services.temporal_execution_service import (
     TemporalExecutionService,
 )
@@ -344,18 +345,24 @@ class TestSubWorkflowLifecycle:
         }
         assert result["failed_activities"] == {}
 
-    async def test_sub_workflow_output_has_m1_envelope(self, temporal_env: object) -> None:
-        """Sub-workflow output follows StandardOutputWrapper structure."""
+    async def test_sub_workflow_output_validates_against_m1_model(self, temporal_env: object) -> None:
+        """Runtime output validates against PR #817's SubWorkflowOutput model."""
         result = await _run_parent_workflow(temporal_env)
 
         sub_wf_output = result["activity_outputs"]["sub_wf_node"]
-        assert "Result" in sub_wf_output
-        assert "StatusCode" in sub_wf_output
-        assert "StatusMessage" in sub_wf_output
-        assert "ErrorMessage" in sub_wf_output
-        assert sub_wf_output["StatusCode"] == 0
-        assert sub_wf_output["ErrorMessage"] is None
-        assert sub_wf_output["Result"]["outputs"] is None
+        validated = SubWorkflowOutput.model_validate(sub_wf_output)
+
+        expected_child_id = str(uuid5(_SUB_WORKFLOW_NAMESPACE, f"{_PARENT_EXECUTION_ID}:sub_wf_node"))
+        assert validated.Result is not None
+        assert validated.Result.child_execution_id == expected_child_id
+        assert validated.Result.child_status == "completed"
+        assert validated.Result.child_workflow_id == str(_CHILD_WF_ID)
+        assert validated.Result.child_workflow_name == "test-child-workflow"
+        assert validated.Result.child_workflow_version == 1
+        assert validated.Result.outputs is None
+        assert validated.StatusCode == 0
+        assert validated.StatusMessage == "Sub-workflow completed successfully"
+        assert validated.ErrorMessage is None
 
 
 @pytest.mark.integration

@@ -387,8 +387,12 @@ class TestSubWorkflowDispatch:
 
             result = await wf._execute_sub_workflow_node(node, node.parameters)
 
-        assert result["output"]["child_execution_id"] == setup_result["execution_id"]
-        assert result["output"]["child_status"] == "completed"
+        assert result["output"]["Result"]["child_execution_id"] == setup_result["execution_id"]
+        assert result["output"]["Result"]["child_status"] == "completed"
+        assert result["output"]["StatusCode"] == 0
+        assert result["output"]["StatusMessage"] == "Sub-workflow completed successfully"
+        assert result["output"]["ErrorMessage"] is None
+        assert result["output"]["Result"]["outputs"] is None
 
     async def test_execute_activity_args(self) -> None:
         wf = _make_workflow_with_depth(2)
@@ -460,7 +464,9 @@ class TestSubWorkflowDispatch:
 
             result = await wf._execute_sub_workflow_node(node, {})
 
-        assert result["output"]["child_status"] == "unknown"
+        assert result["output"]["Result"]["child_status"] is None
+        assert result["output"]["StatusCode"] == 1
+        assert result["output"]["StatusMessage"] == "Sub-workflow returned unexpected status"
 
 
 # ---------------------------------------------------------------------------
@@ -485,9 +491,10 @@ class TestSubWorkflowModels:
 
     def test_output_model_fields(self) -> None:
         output = SubWorkflowOutput()
-        assert output.child_execution_id is None
-        assert output.child_workflow_id is None
-        assert output.child_status is None
+        assert output.Result is None
+        assert output.StatusCode is None
+        assert output.StatusMessage is None
+        assert output.ErrorMessage is None
 
     def test_node_settings_class_registered(self) -> None:
         from syntara.workflows.workflow_engine.graph import _NODE_SETTINGS_CLASS

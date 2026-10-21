@@ -1737,14 +1737,26 @@ class OrchestratorWorkflow(WorkflowConvergeMixin, WorkflowApprovalMixin):
             parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
         )
 
-        child_status = child_result.get("status", "unknown") if isinstance(child_result, dict) else "unknown"
+        valid_child_statuses = {"running", "completed", "completed_with_errors", "failed", "cancelled"}
+        raw_status = child_result.get("status") if isinstance(child_result, dict) else None
+        child_status = raw_status if raw_status in valid_child_statuses else None
+        is_success = child_status == "completed"
+        status_detail = child_status or "returned unexpected status"
         return {
             "output": {
-                "child_execution_id": setup_result["execution_id"],
-                "child_workflow_id": setup_result.get("child_workflow_id"),
-                "child_workflow_name": setup_result.get("child_workflow_name"),
-                "child_workflow_version": setup_result.get("child_workflow_version"),
-                "child_status": child_status,
+                "Result": {
+                    "child_execution_id": setup_result["execution_id"],
+                    "child_workflow_id": setup_result.get("child_workflow_id"),
+                    "child_workflow_name": setup_result.get("child_workflow_name"),
+                    "child_workflow_version": setup_result.get("child_workflow_version"),
+                    "child_status": child_status,
+                    "outputs": None,
+                },
+                "StatusCode": 0 if is_success else 1,
+                "StatusMessage": (
+                    "Sub-workflow completed successfully" if is_success else f"Sub-workflow {status_detail}"
+                ),
+                "ErrorMessage": None,
             }
         }
 

@@ -481,7 +481,7 @@ class TestSubWorkflowModels:
         assert NodeType.SUB_WORKFLOW == "sub_workflow"
 
     def test_activity_name_enum_exists(self) -> None:
-        assert ActivityName.SUB_WORKFLOW == "setup_sub_workflow_execution"
+        assert ActivityName.SUB_WORKFLOW == "execute_sub_workflow_activity"
 
     def test_output_model_registered(self) -> None:
         from syntara.workflows.workflow_engine.models.workflow_definition import NODE_OUTPUT_MODELS

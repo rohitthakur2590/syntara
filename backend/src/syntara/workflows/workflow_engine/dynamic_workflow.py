@@ -1737,7 +1737,7 @@ class OrchestratorWorkflow(WorkflowConvergeMixin, WorkflowApprovalMixin):
             parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
         )
 
-        valid_child_statuses = {"running", "completed", "completed_with_errors", "failed", "cancelled"}
+        valid_child_statuses = {"completed", "completed_with_errors", "failed", "cancelled"}
         raw_status = child_result.get("status") if isinstance(child_result, dict) else None
         child_status = raw_status if raw_status in valid_child_statuses else None
         is_success = child_status == "completed"

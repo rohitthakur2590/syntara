@@ -6,6 +6,9 @@ parent starts, dispatches a sub_workflow node, which calls the setup activity
 the child runs subworkflow_trigger → script, completes, and the parent receives
 the child result and completes.
 
+Also proves downstream parent nodes can consume SubWorkflowOutput fields via
+the normal template resolver (AAP-91263 output contract).
+
 Story: AAP-94069 — Sub-workflow Reference Mode POC
 """
 
@@ -208,10 +211,50 @@ def _build_activities() -> Sequence[Callable[..., Any]]:
     ]
 
 
+def _parent_workflow_def_with_downstream() -> dict[str, Any]:
+    """Parent workflow with a downstream script that consumes sub-workflow output."""
+    return {
+        "schema_version": "2.0.0",
+        "triggers": [
+            {"id": "trigger", "type": "manual_trigger", "parameters": {}},
+        ],
+        "nodes": [
+            {
+                "id": "sub_wf_node",
+                "type": "sub_workflow",
+                "parameters": {
+                    "workflow_id": str(_CHILD_WF_ID),
+                    "trigger_node_id": "child_trigger",
+                    "input_mapping": {"greeting": "hello from parent"},
+                },
+            },
+            {
+                "id": "downstream_script",
+                "type": "script",
+                "parameters": {
+                    "language": "python",
+                    "code": (
+                        "import json, sys\n"
+                        'sys.stdout.write(json.dumps({"child_id": "${sub_wf_node.child_execution_id}",'
+                        ' "child_status": "${sub_wf_node.child_status}",'
+                        ' "child_wf_name": "${sub_wf_node.child_workflow_name}"}))'
+                    ),
+                },
+            },
+        ],
+        "edges": [
+            {"from": "trigger", "to": "sub_wf_node"},
+            {"from": "sub_wf_node", "to": "downstream_script"},
+        ],
+    }
+
+
 async def _run_parent_workflow(
     temporal_env: object,
+    workflow_def: dict[str, Any] | None = None,
+    workflow_name: str = "sub-wf-integration",
 ) -> dict[str, Any]:
-    """Start the parent workflow and return its raw result."""
+    """Start a parent workflow and return its raw result."""
     from temporalio.testing import WorkflowEnvironment
 
     assert isinstance(temporal_env, WorkflowEnvironment)
@@ -227,8 +270,8 @@ async def _run_parent_workflow(
             task_queue=_TASK_QUEUE,
         )
         start = await svc.start_workflow(
-            workflow_def=_parent_workflow_def(),
-            workflow_name="sub-wf-integration",
+            workflow_def=workflow_def or _parent_workflow_def(),
+            workflow_name=workflow_name,
             trigger_node_id="trigger",
             include_node_results=True,
             execution_id=_PARENT_EXECUTION_ID,
@@ -299,3 +342,73 @@ class TestSubWorkflowLifecycle:
             "failed_activities",
         }
         assert result["failed_activities"] == {}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+class TestSubWorkflowDownstreamOutputConsumption:
+    """Prove downstream parent nodes consume SubWorkflowOutput via template resolution."""
+
+    async def test_downstream_node_receives_resolved_child_execution_id(self, temporal_env: object) -> None:
+        """The downstream script's parameters contain the actual UUID, not the raw template."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_downstream(),
+            workflow_name="sub-wf-downstream-integration",
+        )
+
+        assert result["status"] == "completed"
+
+        downstream_input = result["activity_inputs"]["downstream_script"]
+        expected_child_id = str(uuid5(_SUB_WORKFLOW_NAMESPACE, f"{_PARENT_EXECUTION_ID}:sub_wf_node"))
+        assert "${sub_wf_node.child_execution_id}" not in downstream_input["code"]
+        assert expected_child_id in downstream_input["code"]
+
+    async def test_downstream_node_receives_resolved_child_status(self, temporal_env: object) -> None:
+        """The downstream script's parameters contain 'completed', not the raw template."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_downstream(),
+            workflow_name="sub-wf-downstream-integration",
+        )
+
+        downstream_input = result["activity_inputs"]["downstream_script"]
+        assert "${sub_wf_node.child_status}" not in downstream_input["code"]
+        assert "completed" in downstream_input["code"]
+
+    async def test_downstream_script_produces_structured_output(self, temporal_env: object) -> None:
+        """The downstream script executes with resolved values and produces correct JSON output."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_downstream(),
+            workflow_name="sub-wf-downstream-integration",
+        )
+
+        downstream_output = result["activity_outputs"]["downstream_script"]
+        expected_child_id = str(uuid5(_SUB_WORKFLOW_NAMESPACE, f"{_PARENT_EXECUTION_ID}:sub_wf_node"))
+
+        assert downstream_output["stdout_json"]["child_id"] == expected_child_id
+        assert downstream_output["stdout_json"]["child_status"] == "completed"
+        assert downstream_output["stdout_json"]["child_wf_name"] == "test-child-workflow"
+
+    async def test_both_sub_workflow_and_downstream_in_completed(self, temporal_env: object) -> None:
+        """Both sub_wf_node and downstream_script appear in completed_activities."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_downstream(),
+            workflow_name="sub-wf-downstream-integration",
+        )
+
+        assert "sub_wf_node" in result["completed_activities"]
+        assert "downstream_script" in result["completed_activities"]
+        assert result["failed_activities"] == {}
+
+    async def test_parent_completes_with_downstream(self, temporal_env: object) -> None:
+        """Parent workflow with a downstream node completes successfully."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_downstream(),
+            workflow_name="sub-wf-downstream-integration",
+        )
+
+        assert result["status"] == "completed"

@@ -1742,23 +1742,25 @@ class OrchestratorWorkflow(WorkflowConvergeMixin, WorkflowApprovalMixin):
         child_status = raw_status if raw_status in valid_child_statuses else None
         is_success = child_status == "completed"
         status_detail = child_status or "returned unexpected status"
-        return {
-            "output": {
-                "Result": {
-                    "child_execution_id": setup_result["execution_id"],
-                    "child_workflow_id": setup_result.get("child_workflow_id"),
-                    "child_workflow_name": setup_result.get("child_workflow_name"),
-                    "child_workflow_version": setup_result.get("child_workflow_version"),
-                    "child_status": child_status,
-                    "outputs": None,
-                },
-                "StatusCode": 0 if is_success else 1,
-                "StatusMessage": (
-                    "Sub-workflow completed successfully" if is_success else f"Sub-workflow {status_detail}"
-                ),
-                "ErrorMessage": None,
-            }
+        output = {
+            "Result": {
+                "child_execution_id": setup_result["execution_id"],
+                "child_workflow_id": setup_result.get("child_workflow_id"),
+                "child_workflow_name": setup_result.get("child_workflow_name"),
+                "child_workflow_version": setup_result.get("child_workflow_version"),
+                "child_status": child_status,
+                "outputs": None,
+            },
+            "StatusCode": 0 if is_success else 1,
+            "StatusMessage": ("Sub-workflow completed successfully" if is_success else f"Sub-workflow {status_detail}"),
+            "ErrorMessage": None if is_success else f"Sub-workflow {status_detail}",
         }
+
+        if not is_success:
+            msg = f"Sub-workflow {status_detail}"
+            raise ApplicationError(msg, {"output": output}, type="SubWorkflowFailedError", non_retryable=True)
+
+        return {"output": output}
 
     def _process_node_result(self, node: ActivityNode, result: dict[str, Any]) -> dict[str, Any]:
         """Extract control data and output from an activity result."""

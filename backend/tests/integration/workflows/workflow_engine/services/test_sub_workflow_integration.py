@@ -73,6 +73,23 @@ _CHILD_WORKFLOW_DEF: dict[str, Any] = {
     ],
 }
 
+_FAILING_CHILD_WORKFLOW_DEF: dict[str, Any] = {
+    "schema_version": "2.0.0",
+    "triggers": [
+        {"id": "child_trigger", "type": "subworkflow_trigger", "parameters": {}},
+    ],
+    "nodes": [
+        {
+            "id": "child_script",
+            "type": "script",
+            "parameters": {"language": "bash", "code": "exit 1"},
+        },
+    ],
+    "edges": [
+        {"from": "child_trigger", "to": "child_script"},
+    ],
+}
+
 
 def _parent_workflow_def() -> dict[str, Any]:
     """Build the parent workflow definition with a sub_workflow node."""
@@ -197,10 +214,43 @@ def _mock_session_factory() -> Callable[..., contextlib.AbstractAsyncContextMana
     return factory
 
 
-def _build_activities() -> Sequence[Callable[..., Any]]:
+def _mock_session_factory_for_def(
+    child_def: dict[str, Any],
+) -> Callable[..., contextlib.AbstractAsyncContextManager[_MockSession]]:
+    """Like _mock_session_factory but uses a custom child workflow definition."""
+    mock_workflow = SimpleNamespace(
+        id=_CHILD_WF_ID,
+        name="test-child-workflow",
+        project_id=_CHILD_PROJECT_ID,
+        created_by=_CHILD_CREATED_BY,
+        published_version_id=_CHILD_VERSION_ID,
+        is_enabled=True,
+    )
+    mock_version = SimpleNamespace(
+        id=_CHILD_VERSION_ID,
+        version=1,
+        workflow_definition=child_def,
+    )
+
+    call_count = 0
+
+    @contextlib.asynccontextmanager
+    async def factory() -> AsyncIterator[_MockSession]:
+        nonlocal call_count
+        call_count += 1
+        if call_count % 2 == 1:
+            yield _MockSession(exec_results=[(mock_workflow, mock_version), None])
+        else:
+            yield _MockSession()
+
+    return factory
+
+
+def _build_activities(child_def: dict[str, Any] | None = None) -> Sequence[Callable[..., Any]]:
     """Create all activities needed for the parent→child lifecycle."""
+    factory = _mock_session_factory_for_def(child_def) if child_def is not None else _mock_session_factory()
     setup = SubWorkflowSetupActivity(
-        session_factory=_mock_session_factory(),
+        session_factory=factory,  # type: ignore[arg-type]
         task_queue=_TASK_QUEUE,
     )
     return [
@@ -255,12 +305,13 @@ async def _run_parent_workflow(
     temporal_env: object,
     workflow_def: dict[str, Any] | None = None,
     workflow_name: str = "sub-wf-integration",
+    child_workflow_def: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start a parent workflow and return its raw result."""
     from temporalio.testing import WorkflowEnvironment
 
     assert isinstance(temporal_env, WorkflowEnvironment)
-    activities = _build_activities()
+    activities = _build_activities(child_def=child_workflow_def)
     async with Worker(
         temporal_env.client,
         task_queue=_TASK_QUEUE,
@@ -434,3 +485,170 @@ class TestSubWorkflowDownstreamOutputConsumption:
         )
 
         assert result["status"] == "completed"
+
+
+def _parent_workflow_def_with_failing_child() -> dict[str, Any]:
+    """Parent workflow where the sub-workflow node targets a failing child."""
+    return {
+        "schema_version": "2.0.0",
+        "triggers": [
+            {"id": "trigger", "type": "manual_trigger", "parameters": {}},
+        ],
+        "nodes": [
+            {
+                "id": "sub_wf_node",
+                "type": "sub_workflow",
+                "parameters": {
+                    "workflow_id": str(_CHILD_WF_ID),
+                    "trigger_node_id": "child_trigger",
+                    "input_mapping": {},
+                },
+            },
+        ],
+        "edges": [
+            {"from": "trigger", "to": "sub_wf_node"},
+        ],
+    }
+
+
+def _parent_workflow_def_child_failure_with_downstream() -> dict[str, Any]:
+    """Parent with a failing sub-workflow followed by a downstream node."""
+    return {
+        "schema_version": "2.0.0",
+        "triggers": [
+            {"id": "trigger", "type": "manual_trigger", "parameters": {}},
+        ],
+        "nodes": [
+            {
+                "id": "sub_wf_node",
+                "type": "sub_workflow",
+                "parameters": {
+                    "workflow_id": str(_CHILD_WF_ID),
+                    "trigger_node_id": "child_trigger",
+                    "input_mapping": {},
+                },
+            },
+            {
+                "id": "downstream_script",
+                "type": "script",
+                "parameters": {"language": "bash", "code": "echo should_not_run"},
+            },
+        ],
+        "edges": [
+            {"from": "trigger", "to": "sub_wf_node"},
+            {"from": "sub_wf_node", "to": "downstream_script"},
+        ],
+    }
+
+
+def _parent_workflow_def_child_failure_cof() -> dict[str, Any]:
+    """Parent with a failing sub-workflow that has continue_on_failure=true."""
+    return {
+        "schema_version": "2.0.0",
+        "triggers": [
+            {"id": "trigger", "type": "manual_trigger", "parameters": {}},
+        ],
+        "nodes": [
+            {
+                "id": "sub_wf_node",
+                "type": "sub_workflow",
+                "parameters": {
+                    "workflow_id": str(_CHILD_WF_ID),
+                    "trigger_node_id": "child_trigger",
+                    "input_mapping": {},
+                },
+                "settings": {"continue_on_failure": True},
+            },
+            {
+                "id": "downstream_script",
+                "type": "script",
+                "parameters": {"language": "bash", "code": "echo ran_after_failure"},
+            },
+        ],
+        "edges": [
+            {"from": "trigger", "to": "sub_wf_node"},
+            {"from": "sub_wf_node", "to": "downstream_script"},
+        ],
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+class TestSubWorkflowChildFailure:
+    """Prove that child failure correctly propagates through the engine's failure path."""
+
+    async def test_child_failure_marks_parent_as_failed(self, temporal_env: object) -> None:
+        """When child fails, parent workflow status is 'failed'."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_failing_child(),
+            workflow_name="sub-wf-child-failure",
+            child_workflow_def=_FAILING_CHILD_WORKFLOW_DEF,
+        )
+
+        assert result["status"] == "failed"
+
+    async def test_child_failure_records_sub_wf_node_as_failed(self, temporal_env: object) -> None:
+        """The sub_wf_node must appear in failed_activities with a meaningful error."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_failing_child(),
+            workflow_name="sub-wf-child-failure",
+            child_workflow_def=_FAILING_CHILD_WORKFLOW_DEF,
+        )
+
+        assert "sub_wf_node" in result["failed_activities"]
+        assert "Sub-workflow failed" in result["failed_activities"]["sub_wf_node"]
+
+    async def test_child_failure_preserves_output_details(self, temporal_env: object) -> None:
+        """Failed sub-workflow node's namespace still contains child execution details."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_failing_child(),
+            workflow_name="sub-wf-child-failure",
+            child_workflow_def=_FAILING_CHILD_WORKFLOW_DEF,
+        )
+
+        sub_wf_output = result["activity_outputs"]["sub_wf_node"]
+        assert sub_wf_output["Result"]["child_status"] == "failed"
+        assert sub_wf_output["StatusCode"] == 1
+        expected_child_id = str(uuid5(_SUB_WORKFLOW_NAMESPACE, f"{_PARENT_EXECUTION_ID}:sub_wf_node"))
+        assert sub_wf_output["Result"]["child_execution_id"] == expected_child_id
+
+    async def test_child_failure_skips_downstream(self, temporal_env: object) -> None:
+        """When child fails with continue_on_failure=false, downstream nodes do not execute."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_child_failure_with_downstream(),
+            workflow_name="sub-wf-child-failure-downstream",
+            child_workflow_def=_FAILING_CHILD_WORKFLOW_DEF,
+        )
+
+        assert result["status"] == "failed"
+        assert "downstream_script" not in result["completed_activities"]
+        assert "sub_wf_node" in result["failed_activities"]
+
+    async def test_child_failure_cof_runs_downstream(self, temporal_env: object) -> None:
+        """When child fails with continue_on_failure=true, downstream nodes still execute."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_child_failure_cof(),
+            workflow_name="sub-wf-child-failure-cof",
+            child_workflow_def=_FAILING_CHILD_WORKFLOW_DEF,
+        )
+
+        assert result["status"] == "completed_with_errors"
+        assert "sub_wf_node" in result["failed_activities"]
+        assert "downstream_script" in result["completed_activities"]
+
+    async def test_child_failure_no_retry(self, temporal_env: object) -> None:
+        """Sub-workflow nodes must not be retried (NodeSettingsNoRetry)."""
+        result = await _run_parent_workflow(
+            temporal_env,
+            workflow_def=_parent_workflow_def_with_failing_child(),
+            workflow_name="sub-wf-no-retry",
+            child_workflow_def=_FAILING_CHILD_WORKFLOW_DEF,
+        )
+
+        assert result["status"] == "failed"
+        assert "sub_wf_node" in result["failed_activities"]

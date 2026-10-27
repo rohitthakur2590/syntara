@@ -145,7 +145,6 @@ class SubWorkflowSetupActivity:
                 select(Workflow, WorkflowVersion)
                 .join(WorkflowVersion, WorkflowVersion.id == Workflow.published_version_id)  # type: ignore[arg-type]
                 .where(Workflow.id == child_workflow_id)
-                .where(Workflow.is_enabled == True)  # noqa: E712
             )
             row = result.first()
             if row is None:
@@ -156,6 +155,13 @@ class SubWorkflowSetupActivity:
                 )
 
             child_workflow, child_version = row
+
+            if not child_workflow.is_enabled:
+                msg = (
+                    f"Workflow '{child_workflow_id}' is disabled and cannot be "
+                    f"invoked as a sub-workflow. Re-enable it before retrying."
+                )
+                raise ApplicationError(msg, type="WorkflowDisabledError", non_retryable=True)
 
             self._validate_trigger(child_version.workflow_definition, trigger_node_id)
 
